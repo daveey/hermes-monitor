@@ -320,19 +320,18 @@ def test_anthropic_fetch_isolates_active_token_from_legacy_singleton_resolver():
         fetch_account_usage=lambda provider, api_key=None, **kwargs: {"resolved": "wrong", "api_key": api_key},
     )
     with patch.object(plugin_api.importlib, "import_module", return_value=module):
-        result = plugin_api._fetch_account_usage("anthropic", "active-token", False)
+        result = plugin_api._fetch_account_usage("anthropic", "active-token")
 
     assert result == {"resolved": "active-token", "api_key": "active-token"}
 
 
 def test_anthropic_active_oauth_token_populates_both_windows():
-    active = _pool_entry("active", "primary", "valid-oauth-token", 0)
-    pool = _FakePool([active], active)
+    active = plugin_api._snapshot_from_row("anthropic", {
+        "id": "active", "label": "primary", "access_token": "valid-oauth-token", "priority": 0,
+    })
     calls = []
 
     def fake_import(name):
-        if name == "agent.credential_pool":
-            return SimpleNamespace(load_pool=lambda provider: pool)
         if name == "agent.account_usage":
             def fetch(provider, api_key=None, *, read_only=False):
                 assert read_only is True
@@ -342,7 +341,7 @@ def test_anthropic_active_oauth_token_populates_both_windows():
         raise AssertionError(name)
 
     with patch.object(plugin_api.importlib, "import_module", side_effect=fake_import):
-        source = asyncio.run(plugin_api._collect_usage_provider("anthropic"))
+        source = asyncio.run(plugin_api._collect_usage_from_snapshots("anthropic", [active], "Anthropic", None, True))
     claude = plugin_api.build_quotas_response({"anthropic": source}, now=NOW)["providers"][0]
 
     assert calls == [("anthropic", "valid-oauth-token")]
@@ -351,23 +350,19 @@ def test_anthropic_active_oauth_token_populates_both_windows():
 
 
 def test_usage_collection_never_selects_an_expiring_token():
-    active = SimpleNamespace(
-        id="oauth-own", label="claude", priority=0, access_token="old-access",
-        refresh_token="old-refresh", expires_at_ms=(NOW - 3600) * 1000,
-    )
-    select_calls = []
+    active = plugin_api._snapshot_from_row("anthropic", {
+        "id": "oauth-own", "label": "claude", "priority": 0, "access_token": "old-access",
+        "refresh_token": "old-refresh", "expires_at_ms": (NOW - 3600) * 1000,
+    })
 
-    class Pool(_FakePool):
-        def select(self):
-            select_calls.append(1)
-            return self._active
-
-    with patch.object(plugin_api, "_fetch_account_usage", return_value=_usage_snapshot()):
+    with patch.object(plugin_api, "_fetch_account_usage", return_value=_usage_snapshot()) as fetch, patch.object(
+        plugin_api.importlib, "import_module", side_effect=AssertionError("pool access forbidden")
+    ):
         envelope = asyncio.run(
-            plugin_api._collect_usage_provider("anthropic", Pool([active], active), "Anthropic", None)
+            plugin_api._collect_usage_from_snapshots("anthropic", [active], "Anthropic", None, True)
         )
 
-    assert select_calls == []
+    fetch.assert_called_once_with("anthropic", "old-access")
     assert envelope["accounts"][0]["source"]["windows"]
 
 
@@ -494,32 +489,15 @@ def test_empty_pool_is_not_reported_as_an_active_provider():
     assert calls == []
 
 
-def test_unavailable_pool_falls_back_to_singleton_without_retrying_pool_token():
-    entry = _pool_entry("active", "primary", "pool-token", 0)
-    calls = []
-
-    class BrokenPool:
-        def entries(self):
-            raise RuntimeError(CANARY)
-
-        def peek(self):
-            return entry
-
-    def fake_import(name):
-        if name == "agent.credential_pool":
-            return SimpleNamespace(load_pool=lambda provider: BrokenPool())
-        if name == "agent.account_usage":
-            def fetch(provider, **kwargs):
-                calls.append((provider, kwargs))
-                return {"plan": "Pro", "windows": [{"label": "primary", "used_percent": 5, "reset_at": NOW}]}
-            return SimpleNamespace(fetch_account_usage=fetch)
-        raise AssertionError(name)
-
-    with patch.object(plugin_api.importlib, "import_module", side_effect=fake_import):
-        source = asyncio.run(plugin_api._collect_usage_provider("openai-codex"))
-
-    assert source["pool_size"] == 0
-    assert calls == [("openai-codex", {"api_key": None, "read_only": True})]
+def test_missing_snapshot_token_never_falls_back_to_singleton_or_pool():
+    entry = plugin_api._snapshot_from_row("openai-codex", {
+        "id": "active", "label": "primary", "access_token": "", "priority": 0,
+    })
+    with patch.object(plugin_api, "_fetch_account_usage", side_effect=AssertionError("fetch forbidden")) as fetch:
+        source = asyncio.run(plugin_api._collect_usage_from_snapshots("openai-codex", [entry], "Codex", None, True))
+    fetch.assert_not_called()
+    assert source["pool_size"] == 1
+    assert source["accounts"][0]["source"] is None
 
 
 def test_deepseek_key_source_is_reported_without_key_and_missing_key_is_unavailable():

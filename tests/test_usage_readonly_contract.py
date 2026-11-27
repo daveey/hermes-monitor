@@ -23,10 +23,18 @@ def test_poller_explicitly_selects_core_read_only_fetcher(provider, token):
 
     core = SimpleNamespace(fetch_account_usage=fetch)
     with patch.object(plugin_api.importlib, "import_module", return_value=core):
-        result = plugin_api._fetch_account_usage(provider, token, False)
-    assert calls == [(provider, token, True)]
+        result = plugin_api._fetch_account_usage(provider, token)
+    assert calls == ([(provider, token, True)] if token else [])
     assert mutations == []
-    assert result == {"status": "unauthorized", "read_only": True}
+    assert result == ({"status": "unauthorized", "read_only": True} if token else None)
+
+
+@pytest.mark.parametrize("provider", ["openai-codex", "xai-oauth", "openrouter", "anthropic"])
+@pytest.mark.parametrize("token", [None, ""])
+def test_missing_explicit_token_never_imports_core_or_loads_pool(provider, token):
+    with patch.object(plugin_api.importlib, "import_module", side_effect=AssertionError("credential discovery forbidden")) as imports:
+        assert plugin_api._fetch_account_usage(provider, token) is None
+    imports.assert_not_called()
 
 
 def test_async_core_fetch_preserves_read_only_keyword():
@@ -37,7 +45,7 @@ def test_async_core_fetch_preserves_read_only_keyword():
         return "quota"
 
     with patch.object(plugin_api.importlib, "import_module", return_value=SimpleNamespace(fetch_account_usage=fetch)):
-        assert plugin_api._fetch_account_usage("openai-codex", "fixture-token", False) == "quota"
+        assert plugin_api._fetch_account_usage("openai-codex", "fixture-token") == "quota"
     assert calls == [True]
 
 
@@ -50,5 +58,5 @@ def test_legacy_core_without_read_only_support_never_retries_mutating_default():
 
     with patch.object(plugin_api.importlib, "import_module", return_value=SimpleNamespace(fetch_account_usage=fetch)):
         with pytest.raises(TypeError, match="read_only"):
-            plugin_api._fetch_account_usage("openai-codex", "fixture-token", False)
+            plugin_api._fetch_account_usage("openai-codex", "fixture-token")
     assert calls == []

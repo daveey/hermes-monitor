@@ -172,22 +172,13 @@ def _build_workers_payload() -> dict[str, Any]:
     return build_workers_response(tasks, activity, now=now)
 
 
-def _active_pool_token(provider: str) -> str | None:
-    """Token of the credential Hermes will use next for *provider* (pool order), if any.
-
-    Without it the usage API reads the legacy singleton login, which is stale once the
-    user adds a second account and moves it to priority 0.
-    """
-    try:
-        entry = importlib.import_module("agent.credential_pool").load_pool(provider).peek()
-    except Exception:
+def _fetch_account_usage(provider: str, api_key: str | None = None) -> Any:
+    # read_only=True controls HTTP refresh behavior, not core credential
+    # discovery. Missing tokens must never enter resolvers or pool loading.
+    if not api_key:
         return None
-    return getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", None) if entry else None
-
-
-def _fetch_account_usage(provider: str, api_key: str | None = None, use_pool: bool = True) -> Any:
     module = importlib.import_module("agent.account_usage")
-    token = api_key or (_active_pool_token(provider) if use_pool else None)
+    token = api_key
     if provider == "anthropic" and token:
         # Hermes <=0.21 accepts api_key here but its Anthropic fetcher ignores it
         # and resolves the legacy singleton instead. Clone the Hermes fetcher with
@@ -209,9 +200,6 @@ def _fetch_account_usage(provider: str, api_key: str | None = None, use_pool: bo
     return asyncio.run(result) if inspect.isawaitable(result) else result
 
 
-def _entry_token(entry: Any) -> str | None:
-    return getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", None)
-
 
 def _safe_account_label(entry: Any, index: int, secrets: tuple[str, ...]) -> str:
     label = str(getattr(entry, "label", "") or "").strip()
@@ -219,26 +207,6 @@ def _safe_account_label(entry: Any, index: int, secrets: tuple[str, ...]) -> str
         return f"account {index + 1}"
     return label[:80]
 
-
-async def _entry_snapshot(provider: str, entry: Any, shared: dict[str, Any] | None = None) -> Any:
-    """Usage snapshot for one pool entry, fetched at most once per credential.
-
-    A shared (global/Keychain) credential store resolves the same entries for every profile
-    home, so a per-profile fetch would issue N identical calls to the provider's usage API.
-    Those endpoints rate-limit aggressively (Anthropic answers 429 with a ~3 minute
-    ``Retry-After``), which turned every window into "n/a"; ``shared`` carries the snapshot —
-    including a failed one — across profiles.
-    """
-    key = getattr(entry, "id", None)
-    if shared is not None and key is not None and key in shared:
-        return shared[key]
-    token = _entry_token(entry)
-    if not token:
-        return None
-    result = await _limited_call(_fetch_account_usage, provider, token, False)
-    if shared is not None and key is not None:
-        shared[key] = result
-    return result
 
 
 def _failure_name(error: BaseException) -> str:
@@ -251,58 +219,6 @@ def _failure_name(error: BaseException) -> str:
     return name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,59}", name) else "Error"
 
 
-async def _collect_usage_provider(
-    provider: str,
-    pool: Any = None,
-    label: str | None = None,
-    shared: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    failure: str | None = None
-    try:
-        pool = pool or importlib.import_module("agent.credential_pool").load_pool(provider)
-        active = pool.peek()
-        entries = sorted(pool.entries(), key=lambda entry: getattr(entry, "priority", 0))
-    except Exception as error:
-        entries, active = [], None
-        failure = _failure_name(error)
-
-    if not entries:
-        source = await _limited_call(_fetch_account_usage, provider, None, False)
-        return {
-            "pool_size": 0,
-            "provider_label": label,
-            "failure": failure,
-            "accounts": [{"entry_id": None, "account_label": "default", "active": True, "source": source}],
-        }
-
-    active_id = getattr(active, "id", None)
-    secrets = tuple(
-        secret
-        for entry in entries
-        for secret in (
-            getattr(entry, "runtime_api_key", None),
-            getattr(entry, "access_token", None),
-            getattr(entry, "refresh_token", None),
-        )
-        if isinstance(secret, str) and secret
-    )
-    calls = [_entry_snapshot(provider, entry, shared) for entry in entries]
-    snapshots = await asyncio.gather(*calls)
-    return {
-        "pool_size": len(entries),
-        "provider_label": label,
-        "failure": failure,
-        "accounts": [
-            {
-                "entry_id": getattr(entry, "id", None),
-                "account_label": _safe_account_label(entry, index, secrets),
-                "active": bool(active is entry or (active_id is not None and getattr(entry, "id", None) == active_id)),
-                "source": snapshots[index],
-            }
-            for index, entry in enumerate(entries)
-        ],
-    }
-
 
 async def _snapshot_fetch(provider: str, snapshot: _PoolEntrySnapshot, shared: dict[str, Any] | None) -> Any:
     """Fetch usage for one sibling snapshot entry; never refreshes the sibling's token."""
@@ -311,7 +227,7 @@ async def _snapshot_fetch(provider: str, snapshot: _PoolEntrySnapshot, shared: d
         return shared[key]
     if not snapshot.access_token:
         return None
-    result = await _limited_call(_fetch_account_usage, provider, snapshot.access_token, False)
+    result = await _limited_call(_fetch_account_usage, provider, snapshot.access_token)
     if shared is not None and key is not None:
         shared[key] = result
     return result
