@@ -174,11 +174,12 @@ def _build_workers_payload() -> dict[str, Any]:
 
 def _fetch_account_usage(provider: str, api_key: str | None = None) -> Any:
     # read_only=True controls HTTP refresh behavior, not core credential
-    # discovery. Missing tokens must never enter resolvers or pool loading.
-    if not api_key:
+    # discovery. Match core's stripped-token semantics before importing it,
+    # and reject malformed snapshot values instead of coercing credentials.
+    token = api_key.strip() if isinstance(api_key, str) else ""
+    if not token:
         return None
     module = importlib.import_module("agent.account_usage")
-    token = api_key
     if provider == "anthropic" and token:
         # Hermes <=0.21 accepts api_key here but its Anthropic fetcher ignores it
         # and resolves the legacy singleton instead. Clone the Hermes fetcher with
