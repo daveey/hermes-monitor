@@ -317,7 +317,7 @@ def test_anthropic_fetch_isolates_active_token_from_legacy_singleton_resolver():
     anthropic_fetcher.__globals__["resolve_anthropic_token"] = legacy_resolver
     module = SimpleNamespace(
         _fetch_anthropic_account_usage=anthropic_fetcher,
-        fetch_account_usage=lambda provider, api_key=None: {"resolved": "wrong", "api_key": api_key},
+        fetch_account_usage=lambda provider, api_key=None, **kwargs: {"resolved": "wrong", "api_key": api_key},
     )
     with patch.object(plugin_api.importlib, "import_module", return_value=module):
         result = plugin_api._fetch_account_usage("anthropic", "active-token", False)
@@ -334,7 +334,8 @@ def test_anthropic_active_oauth_token_populates_both_windows():
         if name == "agent.credential_pool":
             return SimpleNamespace(load_pool=lambda provider: pool)
         if name == "agent.account_usage":
-            def fetch(provider, api_key=None):
+            def fetch(provider, api_key=None, *, read_only=False):
+                assert read_only is True
                 calls.append((provider, api_key))
                 return _usage_snapshot()
             return SimpleNamespace(fetch_account_usage=fetch)
@@ -391,7 +392,7 @@ def test_dynamic_provider_enumeration_excludes_local_only_and_keeps_unknown_as_n
         if name == "agent.account_usage":
             return SimpleNamespace(
                 _USAGE_FETCHERS={"anthropic": object(), "openai-codex": object()},
-                fetch_account_usage=lambda provider, api_key=None: _usage_snapshot() if provider != "mystery" else None,
+                fetch_account_usage=lambda provider, api_key=None, **kwargs: _usage_snapshot() if provider != "mystery" else None,
             )
         raise AssertionError(name)
 
@@ -425,7 +426,8 @@ def test_collection_uses_active_pool_account_and_isolates_each_account():
             }
             return _fake_credential_module(registry, pools)
         if name == "agent.account_usage":
-            def fetch(provider, api_key=None):
+            def fetch(provider, api_key=None, *, read_only=False):
+                assert read_only is True
                 if api_key == "pool-token-two":
                     raise TimeoutError(CANARY)
                 return {
@@ -517,7 +519,7 @@ def test_unavailable_pool_falls_back_to_singleton_without_retrying_pool_token():
         source = asyncio.run(plugin_api._collect_usage_provider("openai-codex"))
 
     assert source["pool_size"] == 0
-    assert calls == [("openai-codex", {})]
+    assert calls == [("openai-codex", {"api_key": None, "read_only": True})]
 
 
 def test_deepseek_key_source_is_reported_without_key_and_missing_key_is_unavailable():
@@ -590,7 +592,7 @@ def test_pool_labels_never_expose_email_or_token_in_response_or_logs():
         if name == "agent.account_usage":
             return SimpleNamespace(
                 _USAGE_FETCHERS={"anthropic": object(), "openai-codex": object()},
-                fetch_account_usage=lambda provider, api_key=None: {
+                fetch_account_usage=lambda provider, api_key=None, **kwargs: {
                     "plan": "Plus",
                     "windows": [{"label": "primary", "used_percent": 1, "reset_at": NOW}],
                 },

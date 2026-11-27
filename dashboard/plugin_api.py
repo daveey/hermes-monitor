@@ -202,7 +202,10 @@ def _fetch_account_usage(provider: str, api_key: str | None = None, use_pool: bo
             isolated.__kwdefaults__ = fetcher.__kwdefaults__
             result = isolated(api_key=token)
             return asyncio.run(result) if inspect.isawaitable(result) else result
-    result = module.fetch_account_usage(provider, api_key=token) if token else module.fetch_account_usage(provider)
+    # This is a polling read, not credential maintenance. Core's default can
+    # rotate refresh tokens on 401; explicitly select its non-mutating path.
+    # Older cores that cannot honor this contract fail closed (no fallback).
+    result = module.fetch_account_usage(provider, api_key=token, read_only=True)
     return asyncio.run(result) if inspect.isawaitable(result) else result
 
 
