@@ -3,7 +3,6 @@
 The no-SQL runner installs its connection denial before collecting this module.
 Without an installed core this module is explicitly skipped, not simulated.
 """
-import importlib
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -63,7 +62,9 @@ def test_anthropic_real_clone_keeps_ambient_resolver_unreachable():
         return {"five_hour": {"utilization": 0.5, "resets_at": None}}
 
     token = "sk-ant-oat01-fixture-not-a-real-credential"
-    with patch.object(core, "_get_json", response), patch.object(core, "resolve_anthropic_token", forbidden):
+    with patch.object(core, "_get_json", response), patch.object(core, "resolve_anthropic_token", forbidden), patch.object(
+        core, "fetch_account_usage", side_effect=AssertionError("generic dispatch must not replace the isolated clone")
+    ):
         result = plugin_api._fetch_account_usage("anthropic", token)
     assert calls == []
     assert seen == [f"Bearer {token}"]

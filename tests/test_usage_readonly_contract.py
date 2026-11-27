@@ -1,5 +1,4 @@
 """Exercise the production poller boundary without SQL, network or credentials."""
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -30,11 +29,24 @@ def test_poller_explicitly_selects_core_read_only_fetcher(provider, token):
 
 
 @pytest.mark.parametrize("provider", ["openai-codex", "xai-oauth", "openrouter", "anthropic"])
-@pytest.mark.parametrize("token", [None, ""])
+@pytest.mark.parametrize("token", [None, "", " ", "\t", "\n", "\u2003", 17, b"token", [], {}])
 def test_missing_explicit_token_never_imports_core_or_loads_pool(provider, token):
     with patch.object(plugin_api.importlib, "import_module", side_effect=AssertionError("credential discovery forbidden")) as imports:
         assert plugin_api._fetch_account_usage(provider, token) is None
     imports.assert_not_called()
+
+
+@pytest.mark.parametrize("token", [" fixture-token ", "\tfixture-token\n"])
+def test_explicit_token_is_normalized_before_core_dispatch(token):
+    calls = []
+
+    def fetch(provider, api_key=None, *, read_only=False):
+        calls.append((provider, api_key, read_only))
+        return "quota"
+
+    with patch.object(plugin_api.importlib, "import_module", return_value=SimpleNamespace(fetch_account_usage=fetch)):
+        assert plugin_api._fetch_account_usage("openai-codex", token) == "quota"
+    assert calls == [("openai-codex", "fixture-token", True)]
 
 
 def test_async_core_fetch_preserves_read_only_keyword():

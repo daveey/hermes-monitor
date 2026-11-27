@@ -60,6 +60,31 @@ mutants (guard deletion, empty-string bypass, omitted/False read_only, dropped
 token) are killed; the unmodified baseline is green. Real-core tests use denied
 credential seams and recording HTTP doubles, never actual provider calls.
 
+## Independent review F2 correction
+
+Problem: review 6093720310 reproduced a whitespace-only snapshot token reaching
+Codex `resolve_codex_runtime_credentials(refresh_if_expiring=True)` through the
+production collector. OpenRouter also entered ambient provider resolution.
+Why 1: the wrapper's truthiness guard accepted whitespace, while core strips it
+and therefore treats the same value as missing.
+Why 2: immutable auth snapshots preserve raw token values; the boundary had no
+shared normalization rule with its downstream consumer.
+Root (happened): emptiness semantics differed across the credential boundary.
+Root (not caught): missing-token fixtures used only None and the empty string,
+not whitespace or malformed raw snapshot values; fake fetchers did not normalize.
+Recurrence: successor to F1, not a new live credential-write claim. The reviewer
+used recording/raising effects; actual OAuth, HTTP and storage were not invoked.
+Countermeasure: require a string, strip it, refuse an empty result before importing
+core, and pass only the normalized explicit token. No coercion of malformed values.
+Proof: tests on unchanged reviewed production 87c9cfd produced 36 failures and
+88 passes (5 SQL integrations excluded), including genuine real-core collector
+failures. Corrected SQL-denying cohort: 124 passes / 5 excluded. Contract cases
+cover four providers, whitespace, non-string values, and normalized valid tokens;
+19 new real-core cases cover direct refusal, both affected snapshot routes and
+an explicit-token HTTP-only control. External effects remain recording doubles.
+The Anthropic real-core test additionally refuses generic dispatch so deleting
+the isolated clone cannot pass that test through core's newer implementation.
+
 This source correction alone is not an installation, source-review enrollment,
 or quiet-start admission receipt. Those require independent exact-head review,
 normal pin propagation, installed-byte parity and live acceptance separately.
